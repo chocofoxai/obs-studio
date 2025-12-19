@@ -285,7 +285,6 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 	controlsDock->setWindowTitle(QTStr("Basic.Main.Controls"));
 	/* Parenting is done there so controls will be deleted alongside controlsDock */
 	controlsDock->setWidget(controls);
-	addDockWidget(Qt::BottomDockWidgetArea, controlsDock);
 
 	connect(controls, &OBSBasicControls::StreamButtonClicked, this, &OBSBasic::StreamActionTriggered);
 
@@ -342,6 +341,17 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 	connect(ui->transitionDuration, &QSpinBox::valueChanged, this,
 		[this](int value) { SetTransitionDuration(value); });
 
+	/* Main window default layout */
+	setDockCornersVertical(true);
+
+	/* Scenes and Sources dock on left
+	 * This specific arrangement can't be set up in Qt Designer */
+	addDockWidget(Qt::LeftDockWidgetArea, ui->scenesDock);
+	splitDockWidget(ui->scenesDock, ui->sourcesDock, Qt::Vertical);
+	int sideDockWidth = std::min(width() * 30 / 100, 320);
+	resizeDocks({ui->scenesDock, ui->sourcesDock}, {sideDockWidth, sideDockWidth}, Qt::Horizontal);
+	addDockWidget(Qt::BottomDockWidgetArea, controlsDock);
+
 	startingDockLayout = saveState();
 
 	statsDock = new OBSDock();
@@ -389,8 +399,8 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 	};
 	dpi = devicePixelRatioF();
 
-	connect(windowHandle(), &QWindow::screenChanged, displayResize);
-	connect(ui->preview, &OBSQTDisplay::DisplayResized, displayResize);
+	connect(windowHandle(), &QWindow::screenChanged, this, displayResize);
+	connect(ui->preview, &OBSQTDisplay::DisplayResized, this, displayResize);
 
 	/* TODO: Move these into window-basic-preview */
 	/* Preview Scaling label */
@@ -486,7 +496,8 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 		nudge->setShortcut(seq);
 		nudge->setShortcutContext(Qt::WidgetShortcut);
 		ui->preview->addAction(nudge);
-		connect(nudge, &QAction::triggered, [this, distance, direction]() { Nudge(distance, direction); });
+		connect(nudge, &QAction::triggered, this,
+			[this, distance, direction]() { Nudge(distance, direction); });
 	};
 
 	addNudge(Qt::Key_Up, MoveDir::Up, 1);
@@ -555,7 +566,8 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 	ui->previewDisabledWidget->setContextMenuPolicy(Qt::CustomContextMenu);
 	connect(ui->enablePreviewButton, &QPushButton::clicked, this, &OBSBasic::TogglePreview);
 
-	connect(ui->scenes, &SceneTree::scenesReordered, []() { OBSProjector::UpdateMultiviewProjectors(); });
+	connect(ui->scenes, &SceneTree::scenesReordered, ui->scenes,
+		[]() { OBSProjector::UpdateMultiviewProjectors(); });
 
 	connect(App(), &OBSApp::StyleChanged, this, [this]() { OnEvent(OBS_FRONTEND_EVENT_THEME_CHANGED); });
 	connect(App(), &OBSApp::aboutToQuit, this, &OBSBasic::closeWindow);
@@ -1135,7 +1147,7 @@ void OBSBasic::OBSInit()
 			ResizePreview(ovi.base_width, ovi.base_height);
 	};
 
-	connect(ui->preview, &OBSQTDisplay::DisplayCreated, addDisplay);
+	connect(ui->preview, &OBSQTDisplay::DisplayCreated, this, addDisplay);
 
 	/* Show the main window, unless the tray icon isn't available
 	 * or neither the setting nor flag for starting minimized is set. */
@@ -1230,10 +1242,8 @@ void OBSBasic::OBSInit()
 	ui->lockDocks->blockSignals(false);
 
 	bool sideDocks = config_get_bool(App()->GetUserConfig(), "BasicWindow", "SideDocks");
-	on_sideDocks_toggled(sideDocks);
-	ui->sideDocks->blockSignals(true);
 	ui->sideDocks->setChecked(sideDocks);
-	ui->sideDocks->blockSignals(false);
+	setDockCornersVertical(sideDocks);
 
 	SystemTray(true);
 

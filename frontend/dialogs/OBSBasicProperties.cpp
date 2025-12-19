@@ -103,7 +103,7 @@ OBSBasicProperties::OBSBasicProperties(QWidget *parent, OBSSource source_)
 
 	if (drawable_preview && drawable_type) {
 		ui->preview->show();
-		connect(ui->preview, &OBSQTDisplay::DisplayCreated, addDrawCallback);
+		connect(ui->preview, &OBSQTDisplay::DisplayCreated, this, addDrawCallback);
 
 	} else if (type == OBS_SOURCE_TYPE_TRANSITION) {
 		sourceA = obs_source_create_private("scene", "sourceA", nullptr);
@@ -128,7 +128,7 @@ OBSBasicProperties::OBSBasicProperties(QWidget *parent, OBSSource source_)
 		obs_source_inc_active(sourceClone);
 		obs_transition_set(sourceClone, sourceA);
 
-		auto updateCallback = [=]() {
+		auto updateCallback = [this]() {
 			OBSDataAutoRelease settings = obs_source_get_settings(source);
 			obs_source_update(sourceClone, settings);
 
@@ -139,10 +139,10 @@ OBSBasicProperties::OBSBasicProperties(QWidget *parent, OBSSource source_)
 			direction = true;
 		};
 
-		connect(view, &OBSPropertiesView::Changed, updateCallback);
+		connect(view, &OBSPropertiesView::Changed, this, updateCallback);
 
 		ui->preview->show();
-		connect(ui->preview, &OBSQTDisplay::DisplayCreated, addTransitionDrawCallback);
+		connect(ui->preview, &OBSQTDisplay::DisplayCreated, this, addTransitionDrawCallback);
 
 	} else {
 		ui->preview->hide();
@@ -167,7 +167,7 @@ void OBSBasicProperties::AddPreviewButton()
 
 	playButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
 
-	auto play = [=]() {
+	auto play = [this]() {
 		OBSSource start;
 		OBSSource end;
 
@@ -187,7 +187,7 @@ void OBSBasicProperties::AddPreviewButton()
 		end = nullptr;
 	};
 
-	connect(playButton, &QPushButton::clicked, play);
+	connect(playButton, &QPushButton::clicked, this, play);
 }
 
 static obs_source_t *CreateLabel(const char *name, size_t h)
