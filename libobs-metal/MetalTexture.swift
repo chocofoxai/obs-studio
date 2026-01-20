@@ -38,6 +38,31 @@ struct MetalTextureMapping {
 
 /// Convenience class for managing ``MTLTexture`` objects
 class MetalTexture {
+    private static let counterQueue = DispatchQueue(label: "MetalTexture.counterQueue")
+    nonisolated(unsafe) private static var liveCount = 0
+    nonisolated(unsafe) private static var totalCreated = 0
+    nonisolated(unsafe) private static var totalDestroyed = 0
+
+    static func snapshotCounts() -> (live: Int, created: Int, destroyed: Int) {
+        return counterQueue.sync {
+            (live: liveCount, created: totalCreated, destroyed: totalDestroyed)
+        }
+    }
+
+    private static func recordCreate() {
+        counterQueue.sync {
+            liveCount += 1
+            totalCreated += 1
+        }
+    }
+
+    private static func recordDestroy() {
+        counterQueue.sync {
+            liveCount = max(0, liveCount - 1)
+            totalDestroyed += 1
+        }
+    }
+
     private let descriptor: MTLTextureDescriptor
     private var mappingMode: MetalTextureMapMode
     private let resourceID: UUID
@@ -95,6 +120,8 @@ class MetalTexture {
         self.descriptor = texture.descriptor
 
         updateSRGBView()
+
+        MetalTexture.recordCreate()
     }
 
     /// Creates a new ``MetalDevice`` instance with the provided `IOSurfaceRef`
@@ -118,6 +145,8 @@ class MetalTexture {
         self.descriptor = texture.descriptor
 
         updateSRGBView()
+
+        MetalTexture.recordCreate()
     }
 
     /// Creates a new ``MetalDevice`` instance with the provided `MTLTexture`
@@ -133,6 +162,8 @@ class MetalTexture {
         self.descriptor = texture.descriptor
 
         updateSRGBView()
+
+        MetalTexture.recordCreate()
     }
 
     /// Creates a new ``MetalDevice`` instance with a placeholder texture
@@ -157,6 +188,23 @@ class MetalTexture {
         self.resourceID = UUID()
         self.mappingMode = .unmapped
         self.descriptor = texture.descriptor
+
+        MetalTexture.recordCreate()
+    }
+
+    deinit {
+        texture.setPurgeableState(.empty)
+        texture.makeAliasable()
+
+        sRGBtexture?.setPurgeableState(.empty)
+        sRGBtexture?.makeAliasable()
+
+        if let stageBuffer {
+            stageBuffer.buffer.setPurgeableState(.empty)
+            stageBuffer.buffer.makeAliasable()
+        }
+
+        MetalTexture.recordDestroy()
     }
 
     /// Updates the ``MetalTexture`` with a new `IOSurfaceRef`

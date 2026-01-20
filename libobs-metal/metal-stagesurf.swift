@@ -18,6 +18,16 @@
 import Foundation
 import Metal
 
+private struct StageSurfaceKey: Hashable {
+    let width: Int
+    let height: Int
+    let format: MTLPixelFormat
+}
+
+private let stageSurfacePoolQueue = DispatchQueue(label: "MetalStageSurface.pool")
+nonisolated(unsafe) private var stageSurfacePool = [StageSurfaceKey: [MetalStageBuffer]]()
+private let stageSurfacePoolLimit = 4
+
 /// Creates a ``MetalStageBuffer`` instance for use as a stage surface by `libobs`
 /// - Parameters:
 ///   - device: Opaque pointer to ``MetalStageBuffer`` instance shared with `libobs`
@@ -34,6 +44,21 @@ public func device_stagesurface_create(device: UnsafeRawPointer, width: UInt32, 
     -> OpaquePointer?
 {
     let device: MetalDevice = unretained(device)
+
+    let key = StageSurfaceKey(width: Int(width), height: Int(height), format: format.mtlFormat)
+
+    if let pooled = stageSurfacePoolQueue.sync(execute: { () -> MetalStageBuffer? in
+        guard var pool = stageSurfacePool[key], !pool.isEmpty else {
+            return nil
+        }
+
+        let buffer = pool.removeLast()
+        stageSurfacePool[key] = pool
+        return buffer
+    }) {
+        pooled.buffer.setPurgeableState(.nonVolatile)
+        return pooled.getRetained()
+    }
 
     guard
         let buffer = MetalStageBuffer(
@@ -57,7 +82,18 @@ public func device_stagesurface_create(device: UnsafeRawPointer, width: UInt32, 
 /// memory management again.
 @_cdecl("gs_stagesurface_destroy")
 public func gs_stagesurface_destroy(stagesurf: UnsafeRawPointer) {
-    let _ = retained(stagesurf) as MetalStageBuffer
+    let buffer: MetalStageBuffer = retained(stagesurf)
+
+    let key = StageSurfaceKey(width: buffer.width, height: buffer.height, format: buffer.format)
+    stageSurfacePoolQueue.sync {
+        var pool = stageSurfacePool[key] ?? []
+        if pool.count < stageSurfacePoolLimit {
+            buffer.buffer.setPurgeableState(.volatile)
+            pool.append(buffer)
+            stageSurfacePool[key] = pool
+            return
+        }
+    }
 }
 
 /// Gets the "width" of the staging texture

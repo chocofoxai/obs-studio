@@ -474,19 +474,23 @@ public func device_end_scene(device: UnsafeRawPointer) {
 /// a non-null vertex count has to be provided.
 @_cdecl("device_draw")
 public func device_draw(device: UnsafeRawPointer, drawMode: gs_draw_mode, startVertex: UInt32, numVertices: UInt32) {
-    let device: MetalDevice = unretained(device)
+    // Wrap in autoreleasepool to prevent memory growth in headless mode where no
+    // runloop drains autoreleased objects (e.g., MTLRenderPassDescriptor created per draw)
+    autoreleasepool {
+        let device: MetalDevice = unretained(device)
 
-    guard let primitiveType = drawMode.mtlPrimitive else {
-        OBSLog(.error, "device_draw: Unsupported draw mode provided: \(drawMode)")
-        return
-    }
+        guard let primitiveType = drawMode.mtlPrimitive else {
+            OBSLog(.error, "device_draw: Unsupported draw mode provided: \(drawMode)")
+            return
+        }
 
-    do {
-        try device.draw(primitiveType: primitiveType, vertexStart: Int(startVertex), vertexCount: Int(numVertices))
-    } catch let error as MetalError.MTLDeviceError {
-        OBSLog(.error, "device_draw: \(error.description)")
-    } catch {
-        OBSLog(.error, "device_draw: Unknown error occurred")
+        do {
+            try device.draw(primitiveType: primitiveType, vertexStart: Int(startVertex), vertexCount: Int(numVertices))
+        } catch let error as MetalError.MTLDeviceError {
+            OBSLog(.error, "device_draw: \(error.description)")
+        } catch {
+            OBSLog(.error, "device_draw: Unknown error occurred")
+        }
     }
 }
 
@@ -514,43 +518,46 @@ public func device_draw(device: UnsafeRawPointer, drawMode: gs_draw_mode, startV
 public func device_clear(
     device: UnsafeRawPointer, clearFlags: UInt32, color: UnsafePointer<vec4>, depth: Float, stencil: UInt8
 ) {
-    let device: MetalDevice = unretained(device)
+    // Wrap in autoreleasepool to prevent memory growth in headless mode
+    autoreleasepool {
+        let device: MetalDevice = unretained(device)
 
-    var clearState = ClearState()
+        var clearState = ClearState()
 
-    if (Int32(clearFlags) & GS_CLEAR_COLOR) == 1 {
-        clearState.colorAction = .clear
-        clearState.clearColor = MTLClearColor(
-            red: Double(color.pointee.x),
-            green: Double(color.pointee.y),
-            blue: Double(color.pointee.z),
-            alpha: Double(color.pointee.w)
-        )
-    } else {
-        clearState.colorAction = .load
-    }
+        if (Int32(clearFlags) & GS_CLEAR_COLOR) == 1 {
+            clearState.colorAction = .clear
+            clearState.clearColor = MTLClearColor(
+                red: Double(color.pointee.x),
+                green: Double(color.pointee.y),
+                blue: Double(color.pointee.z),
+                alpha: Double(color.pointee.w)
+            )
+        } else {
+            clearState.colorAction = .load
+        }
 
-    if (Int32(clearFlags) & GS_CLEAR_DEPTH) == 1 {
-        clearState.clearDepth = Double(depth)
-        clearState.depthAction = .clear
-    } else {
-        clearState.depthAction = .load
-    }
+        if (Int32(clearFlags) & GS_CLEAR_DEPTH) == 1 {
+            clearState.clearDepth = Double(depth)
+            clearState.depthAction = .clear
+        } else {
+            clearState.depthAction = .load
+        }
 
-    if (Int32(clearFlags) & GS_CLEAR_STENCIL) == 1 {
-        clearState.clearStencil = UInt32(stencil)
-        clearState.stencilAction = .clear
-    } else {
-        clearState.stencilAction = .load
-    }
+        if (Int32(clearFlags) & GS_CLEAR_STENCIL) == 1 {
+            clearState.clearStencil = UInt32(stencil)
+            clearState.stencilAction = .clear
+        } else {
+            clearState.stencilAction = .load
+        }
 
-    do {
-        try device.clear(state: clearState)
+        do {
+            try device.clear(state: clearState)
 
-    } catch let error as MetalError.MTLDeviceError {
-        OBSLog(.error, "device_clear: \(error.description)")
-    } catch {
-        OBSLog(.error, "device_clear: Unknown error occurred")
+        } catch let error as MetalError.MTLDeviceError {
+            OBSLog(.error, "device_clear: \(error.description)")
+        } catch {
+            OBSLog(.error, "device_clear: Unknown error occurred")
+        }
     }
 }
 
@@ -588,9 +595,11 @@ public func device_is_present_ready(device: UnsafeRawPointer) -> Bool {
 /// current command buffer.
 @_cdecl("device_present")
 public func device_present(device: UnsafeRawPointer) {
-    let device: MetalDevice = unretained(device)
-
-    device.finishPendingCommands()
+    // Wrap in autoreleasepool to ensure objects created during frame rendering are released
+    autoreleasepool {
+        let device: MetalDevice = unretained(device)
+        device.finishPendingCommands()
+    }
 }
 
 /// Commits the current command buffer to schedule and execute the GPU commands encoded within it and waits until they
@@ -601,9 +610,11 @@ public func device_present(device: UnsafeRawPointer) {
 /// texture, and also after it has used the GPU to encode a video output frame.
 @_cdecl("device_flush")
 public func device_flush(device: UnsafeRawPointer) {
-    let device: MetalDevice = unretained(device)
-
-    device.finishPendingCommands()
+    // Wrap in autoreleasepool to ensure objects created during frame rendering are released
+    autoreleasepool {
+        let device: MetalDevice = unretained(device)
+        device.finishPendingCommands()
+    }
 }
 
 /// Sets the "current" cull mode to be used by the next draw call
