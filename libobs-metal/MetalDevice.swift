@@ -40,6 +40,9 @@ class MetalDevice {
     private var depthStencilStates = [Int: MTLDepthStencilState]()
     private var obsSignalCallbacks = [MetalSignalType: () -> Void]()
     private var displayLink: CVDisplayLink?
+    private let inFlightSemaphore = DispatchSemaphore(value: 3)
+    private let logStats = (ProcessInfo.processInfo.environment["SL_METAL_STATS"] != nil)
+    private var lastStatsLog = Date()
 
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
@@ -532,9 +535,15 @@ class MetalDevice {
     }
 
     /// Creates a command buffer on the render state if none exists
+    ///
+    /// Uses `makeCommandBufferWithUnretainedReferences()` to avoid retaining resources
+    /// referenced by the command buffer. This prevents memory growth in headless scenarios
+    /// where command buffers are created faster than they complete on the GPU.
+    /// The resources (textures, vertex buffers, etc.) are already retained by their
+    /// respective owner objects, so explicit retention by the command buffer is unnecessary.
     func ensureCommandBuffer() throws {
         if renderState.commandBuffer == nil {
-            guard let buffer = commandQueue.makeCommandBuffer() else {
+            guard let buffer = commandQueue.makeCommandBufferWithUnretainedReferences() else {
                 throw MetalError.MTLCommandQueueError.commandBufferCreationFailure
             }
 
@@ -552,16 +561,20 @@ class MetalDevice {
     /// Thus a virtual "display render stage" state is maintained by the Metal renderer, which is started when a
     /// ``OBSSwapChain`` instance is loaded by `libobs`  and ended when `device_end_scene` is called.
     func finishDisplayRenderStage() {
-        let buffer = commandQueue.makeCommandBufferWithUnretainedReferences()
-        let encoder = buffer?.makeBlitCommandEncoder()
+        // Wrap in autoreleasepool to prevent memory accumulation from per-frame
+        // command buffer/encoder creation during continuous display rendering
+        autoreleasepool {
+            let buffer = commandQueue.makeCommandBufferWithUnretainedReferences()
+            let encoder = buffer?.makeBlitCommandEncoder()
 
-        guard let buffer, let encoder, let swapChain = renderState.swapChain else {
-            return
+            guard let buffer, let encoder, let swapChain = renderState.swapChain else {
+                return
+            }
+
+            encoder.updateFence(swapChain.fence)
+            encoder.endEncoding()
+            buffer.commit()
         }
-
-        encoder.updateFence(swapChain.fence)
-        encoder.endEncoding()
-        buffer.commit()
     }
 
     /// Ensures that all encoded render commands in the current command buffer are committed to the command queue for
@@ -578,7 +591,60 @@ class MetalDevice {
             return
         }
 
+        let isHeadless = swapChains.isEmpty && renderState.swapChain == nil
+
+        // Headless mode has no swapchain backpressure; limit in-flight command buffers
+        // to avoid unbounded growth in Metal driver allocations.
+        if isHeadless {
+            inFlightSemaphore.wait()
+            commandBuffer.addCompletedHandler { [weak self] _ in
+                self?.inFlightSemaphore.signal()
+            }
+        }
+
         commandBuffer.commit()
+
+        if isHeadless {
+            commandBuffer.waitUntilCompleted()
+
+            // Explicitly clear attachment references in headless mode to prevent
+            // accidental retention of transient textures between frames.
+            renderState.renderPassDescriptor.colorAttachments[0].texture = nil
+            renderState.renderPassDescriptor.depthAttachment.texture = nil
+            renderState.renderPassDescriptor.stencilAttachment.texture = nil
+            renderState.renderTarget = nil
+            renderState.depthStencilAttachment = nil
+            renderState.isRendertargetChanged = true
+        }
+
+        if logStats {
+            let now = Date()
+            if now.timeIntervalSince(lastStatsLog) >= 10.0 {
+                let textureStats = MetalTexture.snapshotCounts()
+                let stageStats = MetalStageBuffer.snapshotCounts()
+                let allocatedSizeBytes = device.currentAllocatedSize
+                let allocatedSizeMB = Double(allocatedSizeBytes) / (1024.0 * 1024.0)
+                let recommendedMaxBytes = device.recommendedMaxWorkingSetSize
+                let recommendedMaxMB = Double(recommendedMaxBytes) / (1024.0 * 1024.0)
+                let msg = String(
+                    format: "[metal] stats: pipelines=%d depthStates=%d inFlightTargets=%d textures(live=%d created=%d destroyed=%d) stageBuffers(live=%d created=%d destroyed=%d) allocMB=%.1f maxMB=%.1f headless=%@\n",
+                    pipelines.count,
+                    depthStencilStates.count,
+                    renderState.inFlightRenderTargets.count,
+                    textureStats.live,
+                    textureStats.created,
+                    textureStats.destroyed,
+                    stageStats.live,
+                    stageStats.created,
+                    stageStats.destroyed,
+                    allocatedSizeMB,
+                    recommendedMaxMB,
+                    isHeadless ? "yes" : "no"
+                )
+                fputs(msg, stderr)
+                lastStatsLog = now
+            }
+        }
 
         renderState.inFlightRenderTargets.forEach {
             $0.hasPendingWrites = false
@@ -637,17 +703,21 @@ class MetalDevice {
             finishPendingCommands()
         }
 
-        let buffer = commandQueue.makeCommandBufferWithUnretainedReferences()
-        let encoder = buffer?.makeBlitCommandEncoder()
+        // Wrap in autoreleasepool to prevent memory accumulation from per-frame
+        // command buffer/encoder creation during continuous texture staging
+        try autoreleasepool {
+            let buffer = commandQueue.makeCommandBufferWithUnretainedReferences()
+            let encoder = buffer?.makeBlitCommandEncoder()
 
-        guard let buffer, let encoder else {
-            throw MetalError.MTLCommandQueueError.commandBufferCreationFailure
+            guard let buffer, let encoder else {
+                throw MetalError.MTLCommandQueueError.commandBufferCreationFailure
+            }
+
+            encoder.copy(from: source.texture, to: destination.texture)
+            encoder.endEncoding()
+            buffer.commit()
+            buffer.waitUntilCompleted()
         }
-
-        encoder.copy(from: source.texture, to: destination.texture)
-        encoder.endEncoding()
-        buffer.commit()
-        buffer.waitUntilCompleted()
     }
 
     /// Copies the contents of a texture into a buffer for CPU access
@@ -670,27 +740,31 @@ class MetalDevice {
             finishPendingCommands()
         }
 
-        let buffer = commandQueue.makeCommandBufferWithUnretainedReferences()
-        let encoder = buffer?.makeBlitCommandEncoder()
+        // Wrap in autoreleasepool to prevent memory accumulation from per-frame
+        // command buffer/encoder creation during continuous GPU readback
+        try autoreleasepool {
+            let buffer = commandQueue.makeCommandBufferWithUnretainedReferences()
+            let encoder = buffer?.makeBlitCommandEncoder()
 
-        guard let buffer, let encoder else {
-            throw MetalError.MTLCommandQueueError.commandBufferCreationFailure
+            guard let buffer, let encoder else {
+                throw MetalError.MTLCommandQueueError.commandBufferCreationFailure
+            }
+
+            encoder.copy(
+                from: source.texture,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: .init(x: 0, y: 0, z: 0),
+                sourceSize: .init(width: source.texture.width, height: source.texture.height, depth: 1),
+                to: destination.buffer,
+                destinationOffset: 0,
+                destinationBytesPerRow: destination.width * destination.format.bytesPerPixel!,
+                destinationBytesPerImage: 0)
+
+            encoder.endEncoding()
+            buffer.commit()
+            buffer.waitUntilCompleted()
         }
-
-        encoder.copy(
-            from: source.texture,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: .init(x: 0, y: 0, z: 0),
-            sourceSize: .init(width: source.texture.width, height: source.texture.height, depth: 1),
-            to: destination.buffer,
-            destinationOffset: 0,
-            destinationBytesPerRow: destination.width * destination.format.bytesPerPixel!,
-            destinationBytesPerImage: 0)
-
-        encoder.endEncoding()
-        buffer.commit()
-        buffer.waitUntilCompleted()
     }
 
     /// Copies the contents of a buffer into a texture for GPU access
@@ -702,28 +776,32 @@ class MetalDevice {
     /// buffer pixel data.
     ///
     func stageBufferToTexture(source: MetalStageBuffer, destination: MetalTexture) throws {
-        let buffer = commandQueue.makeCommandBufferWithUnretainedReferences()
-        let encoder = buffer?.makeBlitCommandEncoder()
+        // Wrap in autoreleasepool to prevent memory accumulation from per-frame
+        // command buffer/encoder creation during continuous texture uploads
+        try autoreleasepool {
+            let buffer = commandQueue.makeCommandBufferWithUnretainedReferences()
+            let encoder = buffer?.makeBlitCommandEncoder()
 
-        guard let buffer, let encoder else {
-            throw MetalError.MTLCommandQueueError.commandBufferCreationFailure
+            guard let buffer, let encoder else {
+                throw MetalError.MTLCommandQueueError.commandBufferCreationFailure
+            }
+
+            encoder.copy(
+                from: source.buffer,
+                sourceOffset: 0,
+                sourceBytesPerRow: source.width * source.format.bytesPerPixel!,
+                sourceBytesPerImage: 0,
+                sourceSize: .init(width: source.width, height: source.height, depth: 1),
+                to: destination.texture,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: .init(x: 0, y: 0, z: 0)
+            )
+
+            encoder.endEncoding()
+            buffer.commit()
+            buffer.waitUntilScheduled()
         }
-
-        encoder.copy(
-            from: source.buffer,
-            sourceOffset: 0,
-            sourceBytesPerRow: source.width * source.format.bytesPerPixel!,
-            sourceBytesPerImage: 0,
-            sourceSize: .init(width: source.width, height: source.height, depth: 1),
-            to: destination.texture,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: .init(x: 0, y: 0, z: 0)
-        )
-
-        encoder.endEncoding()
-        buffer.commit()
-        buffer.waitUntilScheduled()
     }
 
     /// Copies a region from a source texture into a region of a destination texture
@@ -747,27 +825,31 @@ class MetalDevice {
             finishPendingCommands()
         }
 
-        let buffer = commandQueue.makeCommandBufferWithUnretainedReferences()
-        let encoder = buffer?.makeBlitCommandEncoder()
+        // Wrap in autoreleasepool to prevent memory accumulation from per-frame
+        // command buffer/encoder creation during texture region copies
+        try autoreleasepool {
+            let buffer = commandQueue.makeCommandBufferWithUnretainedReferences()
+            let encoder = buffer?.makeBlitCommandEncoder()
 
-        guard let buffer, let encoder else {
-            throw MetalError.MTLCommandQueueError.commandBufferCreationFailure
+            guard let buffer, let encoder else {
+                throw MetalError.MTLCommandQueueError.commandBufferCreationFailure
+            }
+
+            encoder.copy(
+                from: source.texture,
+                sourceSlice: 0,
+                sourceLevel: 0,
+                sourceOrigin: sourceRegion.origin,
+                sourceSize: sourceRegion.size,
+                to: destination.texture,
+                destinationSlice: 0,
+                destinationLevel: 0,
+                destinationOrigin: destinationRegion.origin
+            )
+
+            encoder.endEncoding()
+            buffer.commit()
         }
-
-        encoder.copy(
-            from: source.texture,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: sourceRegion.origin,
-            sourceSize: sourceRegion.size,
-            to: destination.texture,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: destinationRegion.origin
-        )
-
-        encoder.endEncoding()
-        buffer.commit()
     }
 
     /// Stops the `CVDisplayLink` used by the ``MetalDevice`` instance

@@ -40,27 +40,29 @@ public func device_texture_create(
     device: UnsafeRawPointer, width: UInt32, height: UInt32, color_format: gs_color_format, levels: UInt32,
     data: UnsafePointer<UnsafePointer<UInt8>?>?, flags: UInt32
 ) -> OpaquePointer? {
-    let device: MetalDevice = unretained(device)
+    return autoreleasepool {
+        let device: MetalDevice = unretained(device)
 
-    let descriptor = MTLTextureDescriptor.init(
-        type: .type2D,
-        width: width,
-        height: height,
-        depth: 1,
-        colorFormat: color_format,
-        levels: levels,
-        flags: flags
-    )
+        let descriptor = MTLTextureDescriptor.init(
+            type: .type2D,
+            width: width,
+            height: height,
+            depth: 1,
+            colorFormat: color_format,
+            levels: levels,
+            flags: flags
+        )
 
-    guard let descriptor, let texture = MetalTexture(device: device, descriptor: descriptor) else {
-        return nil
+        guard let descriptor, let texture = MetalTexture(device: device, descriptor: descriptor) else {
+            return nil
+        }
+
+        if let data {
+            texture.upload(data: data, mipmapLevels: descriptor.mipmapLevelCount)
+        }
+
+        return texture.getRetained()
     }
-
-    if let data {
-        texture.upload(data: data, mipmapLevels: descriptor.mipmapLevelCount)
-    }
-
-    return texture.getRetained()
 }
 
 /// Creates a ``MetalTexture`` instance for a cube texture with the specified usage options and the raw image data (if provided)
@@ -84,27 +86,29 @@ public func device_cubetexture_create(
     device: UnsafeRawPointer, size: UInt32, color_format: gs_color_format, levels: UInt32,
     data: UnsafePointer<UnsafePointer<UInt8>?>?, flags: UInt32
 ) -> OpaquePointer? {
-    let device: MetalDevice = unretained(device)
+    return autoreleasepool {
+        let device: MetalDevice = unretained(device)
 
-    let descriptor = MTLTextureDescriptor.init(
-        type: .typeCube,
-        width: size,
-        height: size,
-        depth: 1,
-        colorFormat: color_format,
-        levels: levels,
-        flags: flags
-    )
+        let descriptor = MTLTextureDescriptor.init(
+            type: .typeCube,
+            width: size,
+            height: size,
+            depth: 1,
+            colorFormat: color_format,
+            levels: levels,
+            flags: flags
+        )
 
-    guard let descriptor, let texture = MetalTexture(device: device, descriptor: descriptor) else {
-        return nil
+        guard let descriptor, let texture = MetalTexture(device: device, descriptor: descriptor) else {
+            return nil
+        }
+
+        if let data {
+            texture.upload(data: data, mipmapLevels: descriptor.mipmapLevelCount)
+        }
+
+        return texture.getRetained()
     }
-
-    if let data {
-        texture.upload(data: data, mipmapLevels: descriptor.mipmapLevelCount)
-    }
-
-    return texture.getRetained()
 }
 
 /// Requests deinitialization of the ``MetalTexture`` instance shared with `libobs`
@@ -475,15 +479,17 @@ public func device_shared_texture_available(device: UnsafeRawPointer) -> Bool {
 /// the texture will fail.
 @_cdecl("device_texture_create_from_iosurface")
 public func device_texture_create_from_iosurface(device: UnsafeRawPointer, iosurf: IOSurfaceRef) -> OpaquePointer? {
-    let device: MetalDevice = unretained(device)
+    return autoreleasepool {
+        let device: MetalDevice = unretained(device)
 
-    let texture = MetalTexture(device: device, surface: iosurf)
+        let texture = MetalTexture(device: device, surface: iosurf)
 
-    guard let texture else {
-        return nil
+        guard let texture else {
+            return nil
+        }
+
+        return texture.getRetained()
     }
-
-    return texture.getRetained()
 }
 
 /// Replaces the current ``IOSurface``-based ``MTLTexture`` wrapped by the provided ``MetalTexture`` instance with a
@@ -498,9 +504,11 @@ public func device_texture_create_from_iosurface(device: UnsafeRawPointer, iosur
 /// `libobs` to hold onto the same opaque ``MetalTexture`` pointer even though the backing surface might have changed.
 @_cdecl("gs_texture_rebind_iosurface")
 public func gs_texture_rebind_iosurface(texture: UnsafeRawPointer, iosurf: IOSurfaceRef) -> Bool {
-    let texture: MetalTexture = unretained(texture)
+    return autoreleasepool {
+        let texture: MetalTexture = unretained(texture)
 
-    return texture.rebind(surface: iosurf)
+        return texture.rebind(surface: iosurf)
+    }
 }
 
 /// Creates a new ``MetalTexture`` instance with an opaque shared texture "handle"

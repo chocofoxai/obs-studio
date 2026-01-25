@@ -19,6 +19,31 @@ import Foundation
 import Metal
 
 class MetalStageBuffer {
+    private static let counterQueue = DispatchQueue(label: "MetalStageBuffer.counterQueue")
+    nonisolated(unsafe) private static var liveCount = 0
+    nonisolated(unsafe) private static var totalCreated = 0
+    nonisolated(unsafe) private static var totalDestroyed = 0
+
+    static func snapshotCounts() -> (live: Int, created: Int, destroyed: Int) {
+        return counterQueue.sync {
+            (live: liveCount, created: totalCreated, destroyed: totalDestroyed)
+        }
+    }
+
+    private static func recordCreate() {
+        counterQueue.sync {
+            liveCount += 1
+            totalCreated += 1
+        }
+    }
+
+    private static func recordDestroy() {
+        counterQueue.sync {
+            liveCount = max(0, liveCount - 1)
+            totalDestroyed += 1
+        }
+    }
+
     let device: MetalDevice
     let buffer: MTLBuffer
     let format: MTLPixelFormat
@@ -41,6 +66,15 @@ class MetalStageBuffer {
         }
 
         self.buffer = buffer
+
+        MetalStageBuffer.recordCreate()
+    }
+
+    deinit {
+        buffer.setPurgeableState(.empty)
+        buffer.makeAliasable()
+
+        MetalStageBuffer.recordDestroy()
     }
 
     /// Gets an opaque pointer for the ``MetalStageBuffer`` instance and increases its reference count by one
